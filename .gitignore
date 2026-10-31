@@ -1,0 +1,12 @@
+# Данные (лицензия CC-BY-NC-4.0, в репозиторий не попадают), чекпойнты и логи
+data/
+checkpoints/
+wandb/
+
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+*.tmp

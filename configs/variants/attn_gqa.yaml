@@ -1,0 +1,6 @@
+extends: ../baseline.yaml
+name: attn_gqa
+model:
+  attention: gqa
+  n_kv_heads: 3
+  ffn_mult: 4.4      # компенсирует параметры K/V, сэкономленные GQA

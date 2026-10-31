@@ -1,0 +1,4 @@
+extends: ../baseline.yaml
+name: pos_rope
+model:
+  positions: rope

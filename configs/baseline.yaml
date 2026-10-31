@@ -1,0 +1,45 @@
+# Базовый GPT-2-подобный вариант: около 2,1 млн параметров на корпус около 4,1 млн токенов (vocab 4000).
+# block_size 128 покрывает p95 длины истории (124 токена).
+name: baseline
+seed: 1337
+
+data:
+  vocab_size: 4000
+  val_fraction: 0.05
+  split_seed: 1234
+
+model:
+  arch: gpt2
+  block_size: 128
+  n_layer: 6
+  n_head: 6
+  n_embd: 144        # кратно 8; 4000 -> 4032 строк эмбеддинга (кратно 64) в модели
+  dropout: 0.1
+  bias: false
+  norm: layernorm
+  ffn: gelu
+  positions: learned
+  attention: full
+
+train:
+  batch_size: 64
+  grad_accum: 1
+  max_steps: 6000
+  lr: 6.0e-4
+  min_lr_ratio: 0.1
+  warmup_steps: 200
+  weight_decay: 0.1
+  grad_clip: 1.0
+  amp_dtype: auto    # auto | fp16 | bf16 | none (только CUDA)
+  compile: auto      # auto = включено на CUDA
+  eval_interval: 250
+  eval_batches: 25
+  eval_seed: 4242
+  log_interval: 50
+  ckpt_interval: 500
+  ckpt_min_seconds: 120
+  sample_interval: 1000
+
+wandb:
+  mode: online       # env WANDB_MODE имеет приоритет
+  project: llm-lab

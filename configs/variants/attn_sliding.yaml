@@ -1,0 +1,5 @@
+extends: ../baseline.yaml
+name: attn_sliding
+model:
+  attention: sliding
+  window_size: 32

@@ -1,0 +1,4 @@
+extends: ../baseline.yaml
+name: ffn_swiglu
+model:
+  ffn: swiglu
