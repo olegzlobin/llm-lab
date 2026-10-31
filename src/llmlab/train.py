@@ -51,7 +51,8 @@ def resolve_runtime(tcfg, device: torch.device) -> dict:
     if not cuda or amp == "none" or amp == "false":
         amp = "none"
     elif amp == "auto":
-        amp = "bf16" if torch.cuda.is_bf16_supported() else "fp16"
+        # без эмуляции: T4 эмулирует bf16 медленно, ему нужен fp16
+        amp = "bf16" if torch.cuda.is_bf16_supported(including_emulation=False) else "fp16"
     if amp not in ("none", "fp16", "bf16"):
         raise ValueError(f"amp_dtype={tcfg.amp_dtype!r}: ожидается auto|fp16|bf16|none")
     comp = str(tcfg.compile).lower()
