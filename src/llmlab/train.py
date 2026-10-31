@@ -14,9 +14,11 @@ import torch.nn as nn
 
 from .checkpoint import CKPT_NAME, get_rng_state, load_checkpoint, save_atomic, set_rng_state, set_seed
 from .config import Config
+from .algebra import read_examples
 from .data import (corpus_dir, fixed_eval_offsets, load_corpus_tokenizer, load_tokens_tensor,
                    make_batch_generator, random_batch, window_batch)
 from .generate import generate_text
+from .metrics import evaluate_accuracy, flat_for_log
 from .model import build_model
 from .tracking import make_logger, resolve_mode
 
@@ -111,7 +113,10 @@ def train(cfg: Config, ckpt_dir: str | os.PathLike, data_root: str | os.PathLike
     def amp_ctx():
         return torch.autocast(device_type=dev.type, dtype=amp_dtype, enabled=amp_dtype is not None)
 
+    use_acc = cfg.data.dataset == "algebra_cot"
+    val_examples = read_examples(cdir / "val.jsonl", max(tc.accuracy_samples, tc.accuracy_final_samples)) if use_acc else []
     step, history, elapsed_prev, run_id = 0, [], 0.0, None
+    acc_history: list = []
     ckpt_path = ckpt_dir / CKPT_NAME
     if resume and ckpt_path.exists():
         ck = load_checkpoint(ckpt_path)
@@ -122,6 +127,7 @@ def train(cfg: Config, ckpt_dir: str | os.PathLike, data_root: str | os.PathLike
         scaler.load_state_dict(ck["scaler"])
         set_rng_state(ck["rng"], batch_gen)
         step, history, elapsed_prev, run_id = ck["step"], ck["history"], ck["elapsed"], ck["wandb_run_id"]
+        acc_history = ck.get("accuracy_history", [])
         log(f"Продолжаю с шага {step} из {ckpt_path}")
 
     train_model = model
@@ -155,7 +161,7 @@ def train(cfg: Config, ckpt_dir: str | os.PathLike, data_root: str | os.PathLike
         save_atomic(ckpt_path, {
             "model": model.state_dict(), "optimizer": opt.state_dict(), "scaler": scaler.state_dict(),
             "step": step, "rng": get_rng_state(batch_gen), "config": cfg.to_dict(), "wandb_run_id": logger.run_id,
-            "history": history, "elapsed": elapsed(), "runtime": rt,
+            "history": history, "accuracy_history": acc_history, "elapsed": elapsed(), "runtime": rt,
         })
         last_ckpt_time = time.time()
 
@@ -179,6 +185,18 @@ def train(cfg: Config, ckpt_dir: str | os.PathLike, data_root: str | os.PathLike
         logger.log({"step": step, "val/loss": v})
         log(f"step {step}: val loss {v:.4f}")
 
+    def do_accuracy(n: int, prefix: str, record: bool = True) -> dict:
+        """Точность на val[:n]: eager-модель, жадно, под no_grad; режим train и ГСЧ обучения не затрагиваются."""
+        res = evaluate_accuracy(model, tok, val_examples[:n], tc.accuracy_batch_size, amp_ctx)
+        if record:
+            acc_history.append({"step": step, "n": res["n"], **{k: res[k] for k in ("answer_accuracy", "exact_solution")},
+                                "by_op": res["by_op"], "by_digits": res["by_digits"]})
+        logger.log({"step": step, **flat_for_log(res, prefix)})
+        log(f"step {step}: {prefix} answer_accuracy {res['answer_accuracy']:.4f} exact {res['exact_solution']:.4f} "
+            f"(n={res['n']})")
+        return res
+
+    final_accuracy = None
     model.train()
     acc = torch.zeros((), device=dev)
     acc_n, last_train, t0, steps_since = 0, None, time.time(), 0
@@ -226,13 +244,18 @@ def train(cfg: Config, ckpt_dir: str | os.PathLike, data_root: str | os.PathLike
                 do_eval(last_train)
             if step % tc.sample_interval == 0 or step == tc.max_steps:
                 do_samples()
+            if use_acc and tc.accuracy_interval and step % tc.accuracy_interval == 0 and step < tc.max_steps:
+                do_accuracy(tc.accuracy_samples, "acc")
             if step % tc.ckpt_interval == 0 and time.time() - last_ckpt_time >= tc.ckpt_min_seconds:
                 save()
-            if step % tc.log_interval == 0 or step % tc.eval_interval == 0:
+            if (step % tc.log_interval == 0 or step % tc.eval_interval == 0
+                    or (tc.accuracy_interval and step % tc.accuracy_interval == 0)):
                 t0, steps_since = time.time(), 0
         if step == tc.max_steps and (not history or history[-1]["step"] != step):
             do_eval(last_train)
             do_samples()
+        if use_acc and step >= tc.max_steps and tc.accuracy_final_samples:
+            final_accuracy = do_accuracy(tc.accuracy_final_samples, "acc_final", record=False)
         save(final=True)
     finally:
         for s, h in old_handlers.items():
@@ -248,7 +271,7 @@ def train(cfg: Config, ckpt_dir: str | os.PathLike, data_root: str | os.PathLike
         "tokens_per_s_mean": sum(tps_log) / len(tps_log) if tps_log else None,
         "peak_mem_mb": torch.cuda.max_memory_allocated() / 2**20 if dev.type == "cuda" else None,
         "train_seconds": elapsed(), "runtime": rt, "history": history, "samples": samples, "config": cfg.to_dict(),
-        "wandb_mode": resolve_mode(cfg),
+        "wandb_mode": resolve_mode(cfg), "accuracy_history": acc_history, "final_accuracy": final_accuracy,
     }
     (ckpt_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.finish()

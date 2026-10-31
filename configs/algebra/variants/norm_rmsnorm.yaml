@@ -1,0 +1,4 @@
+extends: ../baseline.yaml
+name: algebra_norm_rmsnorm
+model:
+  norm: rmsnorm

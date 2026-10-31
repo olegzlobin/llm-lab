@@ -14,8 +14,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from . import algebra
 from .config import Config
-from .tokenizer import EOS_TOKEN, encode_texts, eos_id, load_tokenizer, train_tokenizer
+from .tokenizer import (EOS_TOKEN, CharTokenizer, encode_texts, eos_id, load_tokenizer, train_char_tokenizer,
+                        train_tokenizer)
 
 SENTENCE_KEYS = [f"sentence{i}" for i in range(1, 6)]
 
@@ -155,42 +157,115 @@ def make_splits(raw_train, raw_test, val_fraction, split_seed):
 
 # --- корпус (токенизатор + memmap) ----------------------------------------------
 def corpus_dir(cfg: Config, root: str | os.PathLike | None = None) -> Path:
-    return Path(root or cfg.data.data_dir) / f"vocab{cfg.data.vocab_size}"
+    """Каталог кэша: корпусы и токенизаторы разных датасетов/типов не смешиваются.
+    ru_stories + bpe остаётся в прежнем data/vocab<N> (существующий кэш продолжает работать)."""
+    d = cfg.data
+    base = Path(root or d.data_dir)
+    if d.dataset == "ru_stories" and d.tokenizer == "bpe":
+        return base / f"vocab{d.vocab_size}"
+    return base / (f"{d.dataset}_{d.tokenizer}" + (f"{d.vocab_size}" if d.tokenizer == "bpe" else ""))
+
+
+def token_dtype(vocab_size: int):
+    """Тип на диске и на устройстве для хранения токенов: uint8 при словаре до 256."""
+    return np.uint8 if vocab_size <= 256 else np.uint16
+
+
+def device_dtype(vocab_size: int):
+    """Тип хранения на устройстве: uint8 при словаре до 256, иначе int32 (приведение к long только в батче)."""
+    return torch.uint8 if vocab_size <= 256 else torch.int32
+
+
+def encode_stream(tok, texts: list[str], eos: int, vocab_size: int) -> np.ndarray:
+    """Тексты подряд через EOS в одном массиве нужного типа."""
+    dt = token_dtype(vocab_size)
+    assert vocab_size <= 65536, "uint16 не вмещает такой словарь"
+    if isinstance(tok, CharTokenizer):
+        assert eos == 0
+        return tok.encode_stream(texts).astype(dt)
+    parts = []
+    for ids in encode_texts(tok, texts):
+        parts.append(np.asarray(ids, dtype=dt))
+        parts.append(np.asarray([eos], dtype=dt))
+    return np.concatenate(parts) if parts else np.zeros(0, dtype=dt)
 
 
 def write_bin(path: Path, token_lists: list[list[int]], eos: int, vocab_size: int) -> int:
-    """Истории подряд через EOS в uint16."""
+    """Истории подряд через EOS (uint8 при словаре до 256, иначе uint16)."""
     assert vocab_size <= 65536, "uint16 не вмещает такой словарь"
+    dt = token_dtype(vocab_size)
     parts = []
     for ids in token_lists:
-        parts.append(np.asarray(ids, dtype=np.uint16))
-        parts.append(np.asarray([eos], dtype=np.uint16))
-    arr = np.concatenate(parts) if parts else np.zeros(0, dtype=np.uint16)
+        parts.append(np.asarray(ids, dtype=dt))
+        parts.append(np.asarray([eos], dtype=dt))
+    arr = np.concatenate(parts) if parts else np.zeros(0, dtype=dt)
     arr.tofile(path)
     return int(arr.size)
 
 
-def build_corpus(train, val, test, vocab_size: int, out_dir: Path) -> dict:
-    """Токенизатор обучается только на train. Пишет tokenizer.json, {train,val,test}.bin, meta.json."""
+def build_corpus_from_texts(texts: dict[str, list[str]], vocab_size: int, out_dir: Path, tokenizer: str = "bpe",
+                            extra_meta: dict | None = None) -> dict:
+    """Токенизатор обучается только на texts['train']. Пишет tokenizer.json, {train,val,test}.bin, meta.json.
+    Для char vocab_size должен совпасть с реальным (1 + число символов train): модель строится до prepare."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    texts = {k: [story_text(s) for s in v] for k, v in (("train", train), ("val", val), ("test", test))}
-    tok = train_tokenizer(texts["train"], vocab_size)
+    if tokenizer == "char":
+        tok = train_char_tokenizer(texts["train"])
+        if tok.get_vocab_size() != vocab_size:
+            raise ValueError(f"data.vocab_size={vocab_size}, а в train {tok.get_vocab_size()} (EOS + "
+                             f"{len(tok.chars)} символов: {''.join(tok.chars)!r}); поправьте data.vocab_size в конфиге")
+    else:
+        tok = train_tokenizer(texts["train"], vocab_size)
     tok.save(str(out_dir / "tokenizer.json"))
     eos = eos_id(tok)
-    meta = {"vocab_size": vocab_size, "actual_vocab_size": tok.get_vocab_size(), "eos_id": eos, "splits": {}}
+    dt = token_dtype(vocab_size)
+    meta = {"vocab_size": vocab_size, "actual_vocab_size": tok.get_vocab_size(), "eos_id": eos, "tokenizer": tokenizer,
+            "dtype": np.dtype(dt).name, "splits": {}}
+    meta.update(extra_meta or {})
     for split, tx in texts.items():
-        n = write_bin(out_dir / f"{split}.bin", encode_texts(tok, tx), eos, vocab_size)
-        meta["splits"][split] = {"stories": len(tx), "tokens": n}
+        arr = encode_stream(tok, tx, eos, vocab_size)  # для val/test неизвестный символ char -> UnknownCharError
+        arr.tofile(out_dir / f"{split}.bin")
+        meta["splits"][split] = {"stories": len(tx), "tokens": int(arr.size)}
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return meta
 
 
+def build_corpus(train, val, test, vocab_size: int, out_dir: Path, tokenizer: str = "bpe") -> dict:
+    """ru_stories: тексты историй -> build_corpus_from_texts."""
+    texts = {k: [story_text(s) for s in v] for k, v in (("train", train), ("val", val), ("test", test))}
+    return build_corpus_from_texts(texts, vocab_size, out_dir, tokenizer)
+
+
+def prepare_algebra(cfg: Config, download: bool = True) -> dict:
+    d = cfg.data
+    raw = Path(d.data_dir) / "raw" / "algebra" / d.train_file
+    if not raw.exists():
+        if not download:
+            raise FileNotFoundError(raw)
+        download_file(d.repo_id, d.train_file, raw)
+    rows = algebra.read_csv(raw)
+    train, val, test, report = algebra.dedup_and_split(rows, d.val_size, d.test_size, d.split_seed)
+    out = corpus_dir(cfg)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "dup_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("Отчёт о дублях:\n" + json.dumps(report, ensure_ascii=False, indent=2))
+    for name, part in (("val", val), ("test", test)):
+        algebra.write_examples(out / f"{name}.jsonl", part)  # для метрики точности (instruction/answer/reasoning)
+    texts = {k: [algebra.example_text(r) for r in v] for k, v in (("train", train), ("val", val), ("test", test))}
+    meta = build_corpus_from_texts(texts, d.vocab_size, out, d.tokenizer, {"dataset": d.dataset})
+    meta["dup_report"] = report
+    return meta
+
+
 def prepare(cfg: Config, download: bool = True, force: bool = False) -> dict:
-    """Полная подготовка: скачать, разбить, убрать дубли, обучить BPE, записать memmap."""
+    """Полная подготовка: скачать, разбить, убрать дубли, обучить токенизатор, записать memmap."""
     out = corpus_dir(cfg)
     if (out / "meta.json").exists() and not force:
         print(f"Корпус уже подготовлен: {out}")
         return json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    if cfg.data.dataset == "algebra_cot":
+        meta = prepare_algebra(cfg, download)
+        print(json.dumps({k: v for k, v in meta.items() if k != "dup_report"}, indent=2))
+        return meta
     train, val, test, report = get_splits(cfg, download)
     splits_dir = Path(cfg.data.data_dir) / "splits"
     splits_dir.mkdir(parents=True, exist_ok=True)
@@ -198,14 +273,19 @@ def prepare(cfg: Config, download: bool = True, force: bool = False) -> dict:
         (splits_dir / f"{name}_ids.json").write_text(json.dumps([s.get("storyid") for s in part]))
     (splits_dir / "dup_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print("Отчёт о дублях:\n" + json.dumps(report, ensure_ascii=False, indent=2))
-    meta = build_corpus(train, val, test, cfg.data.vocab_size, out)
+    meta = build_corpus(train, val, test, cfg.data.vocab_size, out, cfg.data.tokenizer)
     meta["dup_report"] = report
     print(json.dumps({k: v for k, v in meta.items() if k != "dup_report"}, indent=2))
     return meta
 
 
+def _meta(cdir: Path) -> dict:
+    return json.loads((cdir / "meta.json").read_text(encoding="utf-8"))
+
+
 def load_tokens(cdir: Path, split: str) -> np.memmap:
-    return np.memmap(cdir / f"{split}.bin", dtype=np.uint16, mode="r")
+    dtype = np.dtype(_meta(cdir).get("dtype", "uint16"))  # старый кэш ru_stories без поля: uint16
+    return np.memmap(cdir / f"{split}.bin", dtype=dtype, mode="r")
 
 
 def load_corpus_tokenizer(cdir: Path):
@@ -214,8 +294,10 @@ def load_corpus_tokenizer(cdir: Path):
 
 # --- батчи ---------------------------------------------------------------------
 def load_tokens_tensor(cdir: Path, split: str, device) -> torch.Tensor:
-    """Весь сплит целиком в памяти устройства (int32; корпус мал). Без DataLoader и копий на шаг."""
-    arr = np.asarray(load_tokens(cdir, split), dtype=np.int32)
+    """Весь сплит целиком в памяти устройства, компактно: uint8 при словаре до 256, иначе int32.
+    К long приводится только батч (window_batch). Без DataLoader и копий на шаг."""
+    dt = np.uint8 if device_dtype(_meta(cdir)["vocab_size"]) == torch.uint8 else np.int32
+    arr = np.array(load_tokens(cdir, split), dtype=dt)  # копия: memmap только для чтения
     return torch.from_numpy(arr).to(device)
 
 

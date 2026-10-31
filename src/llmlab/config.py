@@ -20,6 +20,16 @@ class DataConfig:
     vocab_size: int = 4000
     val_fraction: float = 0.05
     split_seed: int = 1234
+    dataset: str = "ru_stories"  # ru_stories | algebra_cot
+    tokenizer: str = "bpe"  # bpe | char (char: vocab_size = 1 + число символов train, проверяется в prepare_data)
+    val_size: int = 20000  # algebra_cot: фиксированное число примеров в val
+    test_size: int = 20000  # algebra_cot: фиксированное число примеров в test
+
+    def __post_init__(self) -> None:
+        if self.dataset not in ("ru_stories", "algebra_cot"):
+            raise ValueError(f"data.dataset={self.dataset!r}: ожидается ru_stories | algebra_cot")
+        if self.tokenizer not in ("bpe", "char"):
+            raise ValueError(f"data.tokenizer={self.tokenizer!r}: ожидается bpe | char")
 
 
 @dataclass
@@ -66,6 +76,10 @@ class TrainConfig:
     sample_max_new_tokens: int = 100
     sample_temperature: float = 0.8
     sample_top_k: int = 40
+    accuracy_interval: int = 0  # algebra_cot: каждые N шагов точность на val[:accuracy_samples]; 0 = выключено
+    accuracy_samples: int = 512
+    accuracy_final_samples: int = 2000  # финальная оценка на val[:N] после обучения
+    accuracy_batch_size: int = 256
     sample_prompts: list = field(default_factory=lambda: ["Новый год\n", "Старый пёс\nНа окраине деревни"])
 
 

@@ -1,0 +1,5 @@
+extends: ../baseline.yaml
+name: algebra_attn_sliding
+model:
+  attention: sliding
+  window_size: 54      # 216/4, как 128/4 в configs/variants

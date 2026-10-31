@@ -1,0 +1,25 @@
+# Второй датасет: ozlobin/simple_algebra_CoT_1m (сложение/вычитание с цепочкой рассуждений), посимвольный токенизатор.
+# Наследует configs/baseline.yaml (оптимизатор, расписание, интервалы), меняет данные, размеры и число шагов.
+# block_size 216: кратно 8, покрывает p99 длины примера (213 токенов с EOS; mean 113, max 245).
+# n_embd 168: кратно 8 и делится на n_head 6; при словаре 18 (64 строки эмбеддинга) база около 2,1 млн параметров.
+extends: ../baseline.yaml
+name: algebra_baseline
+data:
+  dataset: algebra_cot
+  tokenizer: char
+  repo_id: ozlobin/simple_algebra_CoT_1m
+  train_file: train.csv
+  vocab_size: 18       # EOS + 17 символов (цифры, пробел, перевод строки, + - = ( )); проверяется в prepare_data
+  val_size: 20000
+  test_size: 20000
+  split_seed: 1234
+model:
+  block_size: 216
+  n_embd: 168
+train:
+  max_steps: 24000
+  accuracy_interval: 6000   # 4 раза за запуск (последняя точка - финальная оценка на 2000 примерах)
+  accuracy_samples: 512
+  accuracy_final_samples: 2000
+  sample_max_new_tokens: 216
+  sample_prompts: ["12 + 34 = ", "-503 - 77 = ", "40480 + -968 = "]

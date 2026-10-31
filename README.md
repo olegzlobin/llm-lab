@@ -29,6 +29,7 @@ WANDB_MODE=disabled .venv/bin/python scripts/train.py -c configs/baseline.yaml -
 | `scripts/train.py` | обучение с автопродолжением (`--ckpt-dir`, `--set key=value`) |
 | `scripts/measure_corpus.py` | истории и токены по сплитам для словарей 2000/4000/8000, p95 длины, размер в МБ |
 | `scripts/compare_params.py` | число параметров конфигов; код возврата 1, если отличие от базы больше ±5% |
+| `scripts/evaluate_accuracy.py` | точность решения algebra_cot на val/test по чекпойнту (таблица по операциям и разрядам) |
 | `python -m llmlab.generate` | генерация из чекпойнта |
 
 ## Colab
@@ -89,3 +90,23 @@ loss копится на устройстве и читается раз в `log
 (python, numpy, torch, cuda, генератор батчей), конфиг, id запуска W&B, история. Итог: `ckpt_dir/metrics.json`.
 Режим W&B: `wandb.mode` в конфиге, переменная `WANDB_MODE` приоритетнее (`disabled` для локальных запусков).
 Логируются train/val loss, lr, tokens/s, пиковая память GPU, число параметров, тексты генерации (таблица).
+
+## Второй датасет: simple_algebra_CoT_1m
+
+[ozlobin/simple_algebra_CoT_1m](https://huggingface.co/datasets/ozlobin/simple_algebra_CoT_1m): 1 000 000 примеров
+сложения и вычитания целых (операнды от -100000 до 100000, чаще 3 и 5 разрядов) с пошаговым решением; лицензия в метаданных
+датасета не указана, данные в репозиторий не попадают (`data/` в `.gitignore`). Конфиги: `configs/algebra/baseline.yaml`
+и `configs/algebra/variants/` (`data.dataset: algebra_cot`, `data.tokenizer: char`); для другого конфига `prepare_data`
+запускается заново, кэш лежит отдельно (`data/algebra_cot_char/`, ru_stories остаётся в `data/vocab4000/`).
+
+- Текст примера: `instruction` + решение + EOS. В `reasoning` условие встречается тремя способами (начало совпадает с
+  instruction; первая строка - условие без `=`; условия нет); повтор убирается, подсказка при генерации (`'341 - 745 = '`) всегда
+  префикс обучающего текста.
+- Дубли по нормализованному instruction удаляются до разбиения; val и test по 20 000 примеров (`data.val_size/test_size`),
+  фиксированный `split_seed`, пересечения проверяются. Отчёт: `data/algebra_cot_char/dup_report.json`.
+- Посимвольный токенизатор: словарь из train, EOS=0, символ вне словаря в val/test даёт ошибку. `data.vocab_size` для char
+  должен равняться реальному (18); `prepare_data` проверяет.
+- Метрика `answer_accuracy` (`src/llmlab/metrics.py`): жадная генерация решения по подсказке, число из последней строки после
+  последнего `= ` сверяется с `answer`; разбивка по операции и числу разрядов, доля точных решений. Пример, не помещающийся в
+  `block_size`, и решение без EOS считаются ошибкой. В `train` считается каждые `train.accuracy_interval` шагов на
+  val[:512] и в конце на val[:2000] (W&B, `accuracy_history` и `final_accuracy` в metrics.json); test в обучении не используется.

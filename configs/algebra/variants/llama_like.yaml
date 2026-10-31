@@ -1,0 +1,9 @@
+extends: ../baseline.yaml
+name: algebra_llama_like
+model:
+  norm: rmsnorm
+  ffn: swiglu
+  positions: rope
+  attention: gqa
+  n_kv_heads: 3
+  ffn_mult: 3.0
