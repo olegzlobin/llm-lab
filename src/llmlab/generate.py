@@ -36,7 +36,7 @@ def generate_ids(model, ids: torch.Tensor, max_new_tokens: int, temperature: flo
 
 def generate_text(model, tok, prompt: str, max_new_tokens=100, temperature=0.8, top_k=40, seed=0, device="cpu") -> str:
     eos = eos_id(tok)
-    gen = torch.Generator(device="cpu").manual_seed(seed)
+    gen = torch.Generator(device=device).manual_seed(seed)
     ids = torch.tensor([[eos] + tok.encode(prompt).ids], device=device)
     out = generate_ids(model, ids, max_new_tokens, temperature, top_k, gen, eos)
     return tok.decode([i for i in out[0].tolist() if i != eos])
